@@ -106,6 +106,7 @@
 #include <GL/glew.h>            // Needs to be initialized with glewInit() in user's code.
 #elif defined(IMGUI_IMPL_OPENGL_LOADER_GLAD)
 #include <glad/glad.h>          // Needs to be initialized with gladLoadGL() in user's code.
+#include "wgl/wglext.h"
 #elif defined(IMGUI_IMPL_OPENGL_LOADER_GLAD2)
 #include <glad/gl.h>            // Needs to be initialized with gladLoadGL(...) or gladLoaderLoadGL() in user's code.
 #elif defined(IMGUI_IMPL_OPENGL_LOADER_GLBINDING2)
@@ -150,6 +151,7 @@ static GLuint       g_ShaderHandle = 0, g_VertHandle = 0, g_FragHandle = 0;
 static GLint        g_AttribLocationTex = 0, g_AttribLocationProjMtx = 0;                                // Uniforms location
 static GLuint       g_AttribLocationVtxPos = 0, g_AttribLocationVtxUV = 0, g_AttribLocationVtxColor = 0; // Vertex attributes location
 static unsigned int g_VboHandle = 0, g_ElementsHandle = 0;
+static HGLRC        g_MainGlContext = 0;
 
 // Forward Declarations
 static void ImGui_ImplOpenGL3_InitPlatformInterface();
@@ -164,6 +166,7 @@ bool    ImGui_ImplOpenGL3_Init(const char* glsl_version)
     GLint minor = 0;
     glGetIntegerv(GL_MAJOR_VERSION, &major);
     glGetIntegerv(GL_MINOR_VERSION, &minor);
+    g_MainGlContext = wglGetCurrentContext();
     if (major == 0 && minor == 0)
     {
         // Query GL_VERSION in desktop GL 2.x, the string will start with "<major>.<minor>"
@@ -731,6 +734,14 @@ void    ImGui_ImplOpenGL3_DestroyDeviceObjects()
 
 static void ImGui_ImplOpenGL3_RenderWindow(ImGuiViewport* viewport, void*)
 {
+    ImGuiViewportDataWin32* data = (ImGuiViewportDataWin32*)viewport->PlatformUserData;
+
+        bool suceed = wglMakeCurrent(data->Hdc, data->HgLrc);
+        DWORD errorcode = 0;
+        if (!suceed)
+        {
+            errorcode = GetLastError();
+       }     
     if (!(viewport->Flags & ImGuiViewportFlags_NoRendererClear))
     {
         ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -739,11 +750,100 @@ static void ImGui_ImplOpenGL3_RenderWindow(ImGuiViewport* viewport, void*)
     }
     ImGui_ImplOpenGL3_RenderDrawData(viewport->DrawData);
 }
+static void ImGui_ImplOpenGL3_SwapBuffer(ImGuiViewport* vp, void* render_arg)
+{
+    ImGuiViewportDataWin32* data = (ImGuiViewportDataWin32*)vp->PlatformUserData;
+    SwapBuffers(data->Hdc);
+}
+static void ImGui_ImplOpenGL3_CreateWindow(ImGuiViewport* viewport)
+{
+    ImGuiViewportDataWin32* data = (ImGuiViewportDataWin32*)viewport->PlatformUserData;
+    HDC dc = GetDC(data->Hwnd);
+    if (dc != NULL)
+    {
+        HWND parent_window = NULL;
+        if (viewport->ParentViewportId != 0)
+            if (ImGuiViewport* parent_viewport = ImGui::FindViewportByID(viewport->ParentViewportId))
+                parent_window = (HWND)parent_viewport->PlatformHandle;
+        RECT rect = { (LONG)viewport->Pos.x, (LONG)viewport->Pos.y, (LONG)(viewport->Pos.x + viewport->Size.x), (LONG)(viewport->Pos.y + viewport->Size.y) };
+        ::AdjustWindowRectEx(&rect, data->DwStyle, FALSE, data->DwExStyle);
+        HWND fakeWND =::CreateWindowEx(
+            data->DwExStyle, _T("ImGui Platform"), _T("Untitled"), data->DwStyle,   // Style, class name, window name
+            rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,    // Window area
+            parent_window, NULL, ::GetModuleHandle(NULL), NULL);                    // Parent window, Menu, Instance, Param
 
+        HDC fakeDC = GetDC(fakeWND);			 // Device Context
+
+        PIXELFORMATDESCRIPTOR pfd;
+        ZeroMemory(&pfd, sizeof(pfd));
+        pfd.nSize = sizeof(pfd);
+        pfd.nVersion = 1;
+        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+        pfd.iPixelType = PFD_TYPE_RGBA;
+        pfd.cColorBits = 32;
+        pfd.cAccumBits = 8;
+        pfd.cDepthBits = 24;
+        pfd.cStencilBits = 8;
+
+        int pfdID = ChoosePixelFormat(fakeDC, &pfd);
+        bool error = SetPixelFormat(fakeDC, pfdID, &pfd);
+
+        HGLRC fakeRc = wglCreateContext(fakeDC);
+        wglMakeCurrent(fakeDC, fakeRc);
+
+        const int pixelAttribs[] = {
+                WGL_DRAW_TO_WINDOW_ARB, GL_TRUE,
+                WGL_SUPPORT_OPENGL_ARB, GL_TRUE,
+                WGL_DOUBLE_BUFFER_ARB, GL_TRUE,
+                WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
+                WGL_ACCELERATION_ARB, WGL_FULL_ACCELERATION_ARB,
+                WGL_COLOR_BITS_ARB, 32,
+                WGL_ALPHA_BITS_ARB, 8,
+                WGL_DEPTH_BITS_ARB, 24,
+                WGL_STENCIL_BITS_ARB, 8,
+                WGL_SAMPLE_BUFFERS_ARB, GL_TRUE,
+                WGL_SAMPLES_ARB, 4,
+                0
+        };
+        static PFNWGLCHOOSEPIXELFORMATARBPROC wglChoosePixelFormatARB = nullptr;
+        if (!wglChoosePixelFormatARB)
+            wglChoosePixelFormatARB = reinterpret_cast<PFNWGLCHOOSEPIXELFORMATARBPROC>(wglGetProcAddress("wglChoosePixelFormatARB"));
+
+        static PFNWGLCREATECONTEXTATTRIBSARBPROC wglCreateContextAttribsARB = nullptr;
+        if (!wglCreateContextAttribsARB)
+            wglCreateContextAttribsARB = reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(wglGetProcAddress("wglCreateContextAttribsARB"));
+
+        int pixelFormatID; UINT numFormats;
+        bool status = wglChoosePixelFormatARB(dc, pixelAttribs, NULL, 1, &pixelFormatID, &numFormats);
+
+        PIXELFORMATDESCRIPTOR PFD;
+        int count = DescribePixelFormat(dc, pixelFormatID, sizeof(PFD), &PFD);
+        bool succed = SetPixelFormat(dc, pixelFormatID, &PFD);
+        const int major_min = 4, minor_min = 5;
+        int  contextAttribs[] = {
+            WGL_CONTEXT_MAJOR_VERSION_ARB, major_min,
+            WGL_CONTEXT_MINOR_VERSION_ARB, minor_min,
+            WGL_CONTEXT_PROFILE_MASK_ARB, WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+            0
+        };
+        data->HgLrc = wglCreateContextAttribsARB(dc, 0, contextAttribs);
+
+        wglMakeCurrent(NULL, NULL);
+        wglDeleteContext(fakeRc);
+        ReleaseDC(fakeWND, fakeDC);
+        DestroyWindow(fakeWND);
+
+        wglShareLists(g_MainGlContext, data->HgLrc);
+        ImGui_ImplWin32_SetWindowFocus(viewport);
+        ImGui_ImplWin32_ShowWindow(viewport);
+    }
+}
 static void ImGui_ImplOpenGL3_InitPlatformInterface()
 {
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
     platform_io.Renderer_RenderWindow = ImGui_ImplOpenGL3_RenderWindow;
+    platform_io.Renderer_CreateWindow = ImGui_ImplOpenGL3_CreateWindow;
+    platform_io.Renderer_SwapBuffers = ImGui_ImplOpenGL3_SwapBuffer;
 }
 
 static void ImGui_ImplOpenGL3_ShutdownPlatformInterface()

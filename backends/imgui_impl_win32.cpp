@@ -19,7 +19,6 @@
 #endif
 #include <windows.h>
 #include <tchar.h>
-
 // Using XInput library for gamepad (with recent Windows SDK this may leads to executables which won't run on Windows 7)
 #ifndef IMGUI_IMPL_WIN32_DISABLE_GAMEPAD
 #include <XInput.h>
@@ -90,6 +89,7 @@ bool    ImGui_ImplWin32_Init(void* hwnd)
 
     // Our mouse update function expect PlatformHandle to be filled for the main viewport
     g_hWnd = (HWND)hwnd;
+   
     ImGuiViewport* main_viewport = ImGui::GetMainViewport();
     main_viewport->PlatformHandle = main_viewport->PlatformHandleRaw = (void*)g_hWnd;
     if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
@@ -578,6 +578,8 @@ struct ImGuiViewportDataWin32
     bool    HwndOwned;
     DWORD   DwStyle;
     DWORD   DwExStyle;
+    HDC     Hdc;
+    HGLRC   HgLrc;
 
     ImGuiViewportDataWin32() { Hwnd = NULL; HwndOwned = false;  DwStyle = DwExStyle = 0; }
     ~ImGuiViewportDataWin32() { IM_ASSERT(Hwnd == NULL); }
@@ -621,12 +623,19 @@ static void ImGui_ImplWin32_CreateWindow(ImGuiViewport* viewport)
     data->HwndOwned = true;
     viewport->PlatformRequestResize = false;
     viewport->PlatformHandle = viewport->PlatformHandleRaw = data->Hwnd;
+
+    data->Hdc = GetDC(data->Hwnd);
 }
 
 static void ImGui_ImplWin32_DestroyWindow(ImGuiViewport* viewport)
 {
     if (ImGuiViewportDataWin32* data = (ImGuiViewportDataWin32*)viewport->PlatformUserData)
     {
+        if (data->Hdc)
+            wglMakeCurrent(data->Hdc, NULL);
+        if (data->HgLrc)
+            wglDeleteContext(data->HgLrc);
+
         if (::GetCapture() == data->Hwnd)
         {
             // Transfer capture so if we started dragging from a window that later disappears, we'll still receive the MOUSEUP event.
@@ -777,7 +786,6 @@ static float ImGui_ImplWin32_GetWindowDpiScale(ImGuiViewport* viewport)
     IM_ASSERT(data->Hwnd != 0);
     return ImGui_ImplWin32_GetDpiScaleForHwnd(data->Hwnd);
 }
-
 // FIXME-DPI: Testing DPI related ideas
 static void ImGui_ImplWin32_OnChangedViewport(ImGuiViewport* viewport)
 {
